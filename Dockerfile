@@ -15,4 +15,4 @@ WORKDIR $APP_HOME
 COPY . ./
 
 
-CMD exec gunicorn  gunicorn.conf.py main:app
+CMD exec gunicorn  -c gunicorn.conf.py main:app
