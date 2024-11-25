@@ -1,0 +1,5 @@
+fastapi
+google-cloud-bigquery
+google-cloud-pubsub
+uvicorn
+scikit-learn
