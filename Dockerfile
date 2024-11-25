@@ -6,7 +6,7 @@ ENV PYTHONUNBUFFERED True
 
 
 COPY requirements.txt ./
-
+COPY gunicorn.conf.py ./
 
 RUN pip install -r requirements.txt
 
