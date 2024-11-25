@@ -16,7 +16,7 @@ steps:
   - ${_IMAGE_NAME}
   - --allow-unauthenticated
   - --cpu=2
-  - --memory=1Gi \
+  - --memory=1Gi
   - --concurrency=40
   - --image=${_REGISTRY_PATH}/${_IMAGE_NAME}
   - --region=${_REGION}
