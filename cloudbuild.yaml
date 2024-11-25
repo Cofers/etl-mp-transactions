@@ -1,0 +1,23 @@
+options:
+  logging: CLOUD_LOGGING_ONLY
+steps:
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  args:
+  - gcloud
+  - builds
+  - submit
+  - --tag=${_REGISTRY_PATH}/${_IMAGE_NAME}
+
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  args: 
+  - gcloud
+  - run
+  - deploy
+  - ${_IMAGE_NAME}
+  - --allow-unauthenticated
+  - --cpu=2
+  - --memory=1Gi \
+  - --concurrency=40
+  - --image=${_REGISTRY_PATH}/${_IMAGE_NAME}
+  - --region=${_REGION}
+  

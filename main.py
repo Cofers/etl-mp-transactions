@@ -9,6 +9,8 @@ from src.bigquery import query_raw_transactions
 from src.utils import parse_partitions
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+import base64
+import json
 
 
 fixed_data = [
@@ -16,7 +18,10 @@ fixed_data = [
      'concept': 'traspaso actinver - Receptor: BBVA MEXICO, Beneficiario: BANCO ACTINVER SA POR CTADEL FID 2342*, Cuenta Ref: 012180001107719376, Clave Rastreo: 202411204013300000000029933186, Ref: 0000001', 
      'amount': -500000, 'account_number': '133180000075522355', 'currency': 'MXN', 'bank': 'actinver'}
 ]
-
+# Inicializar estado compartido y lock
+manager = Manager()
+checksums_in_process = manager.list()  # Estado compartido
+lock = Lock()  # Lock para evitar condiciones de carrera
 
 COSINE_THRESHOLD = 0.9
 AMOUNT_THRESHOLD = 1
@@ -75,17 +80,33 @@ def process_transactions(transactions):
 
 @app.post("/")
 async def process_event(request: Request):
-    """Endpoint para recibir y procesar eventos."""
+    """Endpoint para recibir y procesar eventos de Pub/Sub."""
     try:
-        data = await request.json()
-        logging.info(f"Evento recibido: {data}")
+        body = await request.json()
+        logging.info(f"Evento recibido: {body}")
 
-        # Validar estructura de datos
-        if "bucket" not in data or "name" not in data:
-            raise HTTPException(status_code=400, detail="El evento no contiene los campos requeridos.")
+        # Extraer mensaje de Pub/Sub
+        message = body.get("message", {})
+        if not message:
+            raise HTTPException(status_code=400, detail="El evento no contiene un mensaje válido.")
 
-        bucket_name = data['bucket']
-        file_path = data['name']
+        # Decodificar datos en Base64
+        data_encoded = message.get("data")
+        if not data_encoded:
+            raise HTTPException(status_code=400, detail="El evento no contiene datos codificados.")
+
+        decoded_data = b64decode(data_encoded).decode("utf-8")
+        logging.info(f"Datos decodificados: {decoded_data}")
+
+        # Convertir la cadena JSON decodificada en un diccionario
+        event_data = json.loads(decoded_data)
+
+        # Validar estructura de datos del evento
+        bucket_name = event_data.get("bucket")
+        file_path = event_data.get("name")
+        if not bucket_name or not file_path:
+            raise HTTPException(status_code=400, detail="El evento no contiene los campos requeridos (bucket, name).")
+
         logging.info(f"Archivo detectado: gs://{bucket_name}/{file_path}")
 
         # Parsear particiones del nombre del fichero
@@ -107,7 +128,6 @@ async def process_event(request: Request):
             logging.info(f"\n---\nTransacción 1: {pair['transaction_1']}\n"
                          f"Transacción 2: {pair['transaction_2']}\n"
                          f"Similitud: {pair['similarity_score']:.2f}")
-            
 
         # Identificar transacciones únicas usando lock
         with lock:
@@ -117,13 +137,11 @@ async def process_event(request: Request):
             # Agregar checksums al estado compartido
             checksums_in_process.extend([row['checksum'] for row in unique_rows])
 
-
         # Procesar transacciones únicas
         for row in unique_rows:
             print(row)
         process_transactions(unique_rows)
 
-        
         return {"message": f"Procesadas {len(unique_rows)} transacciones."}
 
     except Exception as e:
@@ -131,10 +149,7 @@ async def process_event(request: Request):
         raise HTTPException(status_code=500, detail="Error procesando el evento.")
 
 if __name__ == "__main__":
-    # Inicializar estado compartido y lock
-    manager = Manager()
-    checksums_in_process = manager.list()  # Estado compartido
-    lock = Lock()  # Lock para evitar condiciones de carrera
+    
 
     
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run(app, host="0.0.0.0", port=8081)
