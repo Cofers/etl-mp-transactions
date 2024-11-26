@@ -4,9 +4,9 @@ import time
 from multiprocessing import Manager, Lock
 from fastapi import FastAPI, HTTPException, Request
 from google.cloud import pubsub_v1, bigquery
+from src.ai import detect_anomalies
+from src.utils import process_transactions
 import uvicorn
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 import base64
 import json
 
@@ -55,48 +55,64 @@ logging.basicConfig(
 
 app = FastAPI()
 
-def calculate_field_similarity(field1, field2):
-    """Calcula la similitud entre dos campos."""
-    if isinstance(field1, str) and isinstance(field2, str):
-        # Texto: Usar cosine similarity
-        vectorizer = TfidfVectorizer()
-        tfidf_matrix = vectorizer.fit_transform([field1, field2])
-        return cosine_similarity(tfidf_matrix)[0, 1]
-    elif isinstance(field1, (int, float)) and isinstance(field2, (int, float)):
-        # Números: Diferencia relativa
-        return 1 - abs(field1 - field2) / max(abs(field1), abs(field2))
-    else:
-        # Exact match para otros tipos
-        return 1 if field1 == field2 else 0
+def parse_event_body(body):
+    """Parsea y valida el cuerpo del evento."""
+    message = body.get("message", {})
+    if not message:
+        raise HTTPException(
+            status_code=400, detail="El evento no contiene un mensaje válido."
+        )
 
-def calculate_combined_similarity(tx1, tx2):
-    """Calcula la similitud combinada entre dos transacciones."""
-    total_similarity = 0
-    for field, weight in FIELDS.items():
-        similarity = calculate_field_similarity(tx1.get(field), tx2.get(field))
-        logging.debug(f"Campo: {field}, Similitud: {similarity:.3f}, Peso: {weight:.1f}")
-        total_similarity += weight * similarity
-    return total_similarity
+    data_encoded = message.get("data")
+    if not data_encoded:
+        raise HTTPException(
+            status_code=400, detail="El evento no contiene datos codificados."
+        )
 
-def detect_anomalies(transactions1, transactions2):
-    """Detecta anomalías entre dos conjuntos de transacciones."""
-    logging.info(f"Detectando anomalías entre {len(transactions1)} y {len(transactions2)} transacciones.")
-    anomalies = []
-    for tx1 in transactions1:
-        for tx2 in transactions2:
-            similarity = calculate_combined_similarity(tx1, tx2)
-            logging.info(f"Similitud combinada: {similarity:.3f}")
+    decoded_data = base64.b64decode(data_encoded).decode("utf-8")
+    logging.info(f"Datos decodificados: {decoded_data}")
 
-            if similarity >= SIMILARITY_THRESHOLD:
-                anomalies.append({
-                    "transaction_1": tx1,
-                    "transaction_2": tx2,
-                    "similarity_score": similarity
-                })
-                logging.info(f"Anomalía detectada: TX1: {tx1}\n TX2: {tx2}\n Similitud: {similarity:.3f}")
+    return json.loads(decoded_data)
 
-    logging.info(f"Anomalías detectadas: {len(anomalies)}")
+def validate_event_data(event_data):
+    """Valida los campos necesarios en el evento."""
+    bucket_name = event_data.get("bucket")
+    file_path = event_data.get("name")
+    if not bucket_name or not file_path:
+        raise HTTPException(
+            status_code=400,
+            detail="El evento no contiene los campos requeridos (bucket, name).",
+        )
+    logging.info(f"Archivo detectado: gs://{bucket_name}/{file_path}")
+    return bucket_name, file_path
+
+def process_anomalies(raw_data, bigquery_data):
+    """Detecta anomalías entre los conjuntos de datos."""
+    start_time = time.time()
+    anomalies = detect_anomalies(raw_data, bigquery_data)
+    elapsed_time = time.time() - start_time
+    logging.info(f"Detección completada en {elapsed_time:.3f} segundos.")
+
+    if anomalies:
+        for anomaly in anomalies:
+            logging.info(f"Anomalía detectada: {json.dumps(anomaly, indent=2)}")
+
     return anomalies
+
+def filter_unique_transactions(rows_to_process):
+    """Filtra las transacciones únicas usando un lock y el estado compartido."""
+    print(f"Transactions in  memory: {checksums_in_process}")
+          
+    with lock:
+        unique_rows = [row for row in rows_to_process if row['checksum'] not in checksums_in_process]
+        logging.info(f"Transacciones únicas a procesar tras filtro checksum local: {len(unique_rows)}")
+
+        # Agregar checksums al estado compartido
+        checksums_in_process.extend([row['checksum'] for row in unique_rows])
+
+    return unique_rows
+
+
 
 @app.post("/")
 async def process_event(request: Request):
@@ -105,46 +121,18 @@ async def process_event(request: Request):
         body = await request.json()
         logging.info(f"Evento recibido: {body}")
 
-        # Extraer mensaje de Pub/Sub
-        message = body.get("message", {})
-        if not message:
-            raise HTTPException(
-                status_code=400, detail="El evento no contiene un mensaje válido."
-            )
+        # Parsear y validar el cuerpo del evento
+        event_data = parse_event_body(body)
+        bucket_name, file_path = validate_event_data(event_data)
 
-        # Decodificar datos en Base64
-        data_encoded = message.get("data")
-        if not data_encoded:
-            raise HTTPException(
-                status_code=400, detail="El evento no contiene datos codificados."
-            )
+        # Detectar anomalías
+        anomalies = process_anomalies(raw_data, bigquery_data)
 
-        decoded_data = base64.b64decode(data_encoded).decode("utf-8")
-        logging.info(f"Datos decodificados: {decoded_data}")
+        # Identificar transacciones únicas
+        unique_rows = filter_unique_transactions(raw_data)
 
-        # Convertir la cadena JSON decodificada en un diccionario
-        event_data = json.loads(decoded_data)
-
-        # Validar estructura de datos del evento
-        bucket_name = event_data.get("bucket")
-        file_path = event_data.get("name")
-        if not bucket_name or not file_path:
-            raise HTTPException(
-                status_code=400,
-                detail="El evento no contiene los campos requeridos (bucket, name).",
-            )
-
-        logging.info(f"Archivo detectado: gs://{bucket_name}/{file_path}")
-
-        # Procesar transacciones
-        start_time = time.time()
-        anomalies = detect_anomalies(raw_data, bigquery_data)
-        elapsed_time = time.time() - start_time
-        logging.info(f"Detección completada en {elapsed_time:.3f} segundos.")
-
-        if anomalies:
-            for anomaly in anomalies:
-                logging.info(f"Anomalía detectada: {json.dumps(anomaly, indent=2)}")
+        # Procesar transacciones únicas
+        process_transactions(unique_rows)
 
         return {"message": f"Procesadas {len(raw_data)} transacciones, {len(anomalies)} anomalías detectadas."}
 
