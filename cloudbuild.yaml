@@ -18,6 +18,7 @@ steps:
   - --cpu=2
   - --memory=1Gi
   - --concurrency=40
+  - --max-instances=1
   - --image=${_REGISTRY_PATH}/${_IMAGE_NAME}
   - --region=${_REGION}
   
