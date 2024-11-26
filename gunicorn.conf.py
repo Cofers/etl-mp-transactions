@@ -1,5 +1,5 @@
 bind = "0.0.0.0:8080"
-workers = 1  # Número de procesos basado en núcleos de CPU
+workers = 2  # Número de procesos basado en núcleos de CPU
 threads = 4  # Número de hebras por worker
 worker_class = "uvicorn.workers.UvicornWorker"
 timeout = 120  # Tiempo de espera máximo para una solicitud

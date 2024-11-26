@@ -24,6 +24,5 @@ def query_raw_transactions(partitions,file_name):
       AND company_id = '{partitions['company_id']}'
       and _FILE_NAME = 'gs://ingesta-pruebas-cofers-domingo/{file_name}'
     """
-    print(query)
     query_job = bq_client.query(query)
     return [dict(row) for row in query_job]
