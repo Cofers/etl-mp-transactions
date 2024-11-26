@@ -1,9 +1,9 @@
 from locust import HttpUser, task, between
 
 class FastAPIUser(HttpUser):
-    wait_time = between(1, 3) 
+    wait_time = between(0,1) 
     total_requests = 5
-    
+
     @task
     def post_event(self):
         headers = {"Content-Type": "application/json"}
