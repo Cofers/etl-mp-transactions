@@ -22,7 +22,7 @@ def query_raw_transactions(partitions,file_name):
       AND month = {partitions['month']} 
       AND day = {partitions['day']} 
       AND company_id = '{partitions['company_id']}'
-      and _FILE_NAME = '{file_name}'
+      and _FILE_NAME = 'gs://ingesta-pruebas-cofers-domingo/{file_name}'
     """
     print(query)
     query_job = bq_client.query(query)

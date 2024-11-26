@@ -5,7 +5,8 @@ from multiprocessing import Manager, Lock
 from fastapi import FastAPI, HTTPException, Request
 from google.cloud import pubsub_v1, bigquery
 from src.ai import detect_anomalies
-from src.utils import process_transactions
+from src.utils import process_transactions, parse_partitions
+from src.bigquery import query_raw_transactions
 import uvicorn
 import base64
 import json
@@ -174,16 +175,25 @@ async def process_event(request: Request):
         event_data = parse_event_body(body)
         bucket_name, file_path = validate_event_data(event_data)
 
+        partitions = parse_partitions(file_path)
+
+        #raw data
+        rows_to_process = query_raw_transactions(partitions, file_path)
+        logging.info(f"Transacciones ingestadas en raw: {len(rows_to_process)}\n")
+        #for row in rows_to_process:
+        #    logging.info(f"Transacción recuperada: {row}")
+
+        
         # Detectar anomalías
-        anomalies = process_anomalies(raw_data, bigquery_data)
+        anomalies = process_anomalies(rows_to_process, bigquery_data)
 
 
-        unique_rows = filter_unique_transactions(raw_data)
+        unique_rows = filter_unique_transactions(rows_to_process)
 
         # Procesar transacciones únicas
         process_transactions(unique_rows)
 
-        return {"message": f"Procesadas {len(raw_data)} transacciones, {len(anomalies)} anomalías detectadas."}
+        return {"message": f"Procesadas {len(unique_rows)} transacciones, {len(anomalies)} anomalías detectadas."}
 
     except Exception as e:
         logging.error(f"Error procesando el evento: {str(e)}")
