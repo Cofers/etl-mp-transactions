@@ -4,3 +4,4 @@ google-cloud-pubsub
 uvicorn
 scikit-learn
 gunicorn
+redis

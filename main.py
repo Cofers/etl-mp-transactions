@@ -9,6 +9,11 @@ from src.utils import process_transactions
 import uvicorn
 import base64
 import json
+import redis
+
+redis_client = redis.Redis(host='localhost', port=6379, decode_responses=True)
+LOCK_EXPIRY_SECONDS = 5
+
 
 raw_data = [
     {
@@ -55,6 +60,20 @@ logging.basicConfig(
 
 app = FastAPI()
 
+def check_redis_connection():
+    """Verifica la conexión a Redis antes de iniciar la aplicación."""
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            redis_client.ping()
+            logging.info("Conexión a Redis exitosa.")
+            return
+        except redis.ConnectionError:
+            logging.warning(f"Intento {attempt + 1}/{max_retries}: Redis no disponible. Reintentando en 2 segundos...")
+            time.sleep(2)
+    logging.error("No se pudo conectar a Redis después de múltiples intentos. Cerrando la aplicación.")
+    sys.exit(1)
+
 def parse_event_body(body):
     """Parsea y valida el cuerpo del evento."""
     message = body.get("message", {})
@@ -99,17 +118,47 @@ def process_anomalies(raw_data, bigquery_data):
 
     return anomalies
 
+
+def acquire_lock(key):
+    """Intenta adquirir un lock en Redis."""
+    lock_key = f"lock:{key}"
+    is_locked = redis_client.set(lock_key, "1", nx=True, ex=LOCK_EXPIRY_SECONDS)
+    return is_locked
+
+def release_lock(key):
+    """Libera el lock en Redis."""
+    lock_key = f"lock:{key}"
+    redis_client.delete(lock_key)
+
+def store_checksum_atomic(checksum):
+    """Guarda un checksum en Redis con exclusión mutua."""
+    lock_key = f"checksum:{checksum}"
+    if acquire_lock(lock_key):
+        try:
+            redis_client.sadd("processed_checksums", checksum)
+            logging.info(f"Checksum almacenado: {checksum}")
+        finally:
+            release_lock(lock_key)
+    else:
+        logging.warning(f"No se pudo adquirir lock para checksum: {checksum}")
+
+def is_checksum_processed_atomic(checksum):
+    """Verifica si un checksum ya fue procesado."""
+    return redis_client.sismember("processed_checksums", checksum)
+
+
 def filter_unique_transactions(rows_to_process):
-    """Filtra las transacciones únicas usando un lock y el estado compartido."""
-    print(f"Transactions in  memory: {checksums_in_process}")
-          
-    with lock:
-        unique_rows = [row for row in rows_to_process if row['checksum'] not in checksums_in_process]
-        logging.info(f"Transacciones únicas a procesar tras filtro checksum local: {len(unique_rows)}")
+    """Filtra las transacciones únicas utilizando Redis."""
+    unique_rows = []
+    for row in rows_to_process:
+        checksum = row['checksum']
+        if not is_checksum_processed_atomic(checksum):
+            unique_rows.append(row)
+            store_checksum_atomic(checksum)
+        else:
+            logging.info(f"Checksum ya procesado: {checksum}")
 
-        # Agregar checksums al estado compartido
-        checksums_in_process.extend([row['checksum'] for row in unique_rows])
-
+    logging.info(f"Transacciones únicas a procesar: {len(unique_rows)}")
     return unique_rows
 
 
@@ -128,7 +177,7 @@ async def process_event(request: Request):
         # Detectar anomalías
         anomalies = process_anomalies(raw_data, bigquery_data)
 
-        # Identificar transacciones únicas
+
         unique_rows = filter_unique_transactions(raw_data)
 
         # Procesar transacciones únicas
@@ -141,4 +190,5 @@ async def process_event(request: Request):
         raise HTTPException(status_code=500, detail="Error procesando el evento.")
 
 if __name__ == "__main__":
+    check_redis_connection()
     uvicorn.run(app, host="0.0.0.0", port=8081)
