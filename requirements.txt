@@ -5,3 +5,4 @@ uvicorn
 scikit-learn
 gunicorn
 redis
+PyYAML==6.0.1

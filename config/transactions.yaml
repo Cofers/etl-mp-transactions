@@ -1,0 +1,9 @@
+- name: transactions
+  extraction: etl.extraction.bigquery.query_raw_transactions
+  transformations:
+    - etl.transformations.transactions.process_transactions
+  filters:
+    - etl.filters.checksum_bigquery.unique_ids
+  loads:
+    - etl.loads.bigquery.insert
+    - etl.loads.pubsub.push

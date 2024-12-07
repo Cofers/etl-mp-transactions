@@ -11,46 +11,21 @@ import uvicorn
 import base64
 import json
 import redis
+from src import redis_tools
+from theetl.etl import ETL
+from src.redis_tools import filter_unique_transactions, acquire_lock, release_lock
 
 redis_client = redis.Redis(host='localhost', port=6379, decode_responses=True)
-LOCK_EXPIRY_SECONDS = 5
 
 
-raw_data = [
-    {
-        "checksum": "22222",
-        "transaction_date": "2024-11-20",
-        "concept": "traspaso actinver - Receptor: BBVA MEXICO, Beneficiario: BANCO ACTINVER SA POR CTADEL FID 2342*, Cuenta Ref: 012180001107719376, Clave Rastreo: 202411204013300000000029933186, Ref: 0000001",
-        "amount": -50000,
-        "account_number": "133180000075522355",
-        "currency": "MXN",
-        "bank": "actinver"
-    }
-]
-bigquery_data = [
-    {
-        "checksum": "673eb8b4cced4706752afd3e",
-        "transaction_date": "2024-11-20",
-        "concept": "traspaso actinver - Receptor: BBVA MEXICO, Beneficiario: BANCO ACTINVER SA POR CTADEL FID 2342*, Cuenta Ref: 012180001107719376, Clave Rastreo: 202411204013300000000029933186, Ref: 0000001",
-        "amount": -500000,
-        "account_number": "133180000075522355",
-        "currency": "MXN",
-        "bank": "actinver"
-    }
-]
+
+
 
 manager = Manager()
 checksums_in_process = manager.list()  # Estado compartido
 lock = Lock()  # Lock para evitar condiciones de carrera
 
-SIMILARITY_THRESHOLD = 0.9
-FIELDS = {
-    "concept": 0.8,        # Texto
-    "amount": 0.1,         # Numérico
-    "account_number": 0.0, # Exacto
-    "bank": 0.0,           # Exacto
-    "transaction_date": 0.1 # Exacto
-}
+
 
 logging.basicConfig(
     stream=sys.stdout,
@@ -69,11 +44,13 @@ def check_redis_connection():
             redis_client.ping()
             logging.info("Conexión a Redis exitosa.")
             return
-        except redis.ConnectionError:
+        except redis_tools.ConnectionError:
             logging.warning(f"Intento {attempt + 1}/{max_retries}: Redis no disponible. Reintentando en 2 segundos...")
             time.sleep(2)
     logging.error("No se pudo conectar a Redis después de múltiples intentos. Cerrando la aplicación.")
     sys.exit(1)
+
+
 
 def parse_event_body(body):
     """Parsea y valida el cuerpo del evento."""
@@ -106,61 +83,9 @@ def validate_event_data(event_data):
     logging.info(f"Archivo detectado: gs://{bucket_name}/{file_path}")
     return bucket_name, file_path
 
-def process_anomalies(raw_data, bigquery_data):
-    """Detecta anomalías entre los conjuntos de datos."""
-    start_time = time.time()
-    anomalies = detect_anomalies(raw_data, bigquery_data)
-    elapsed_time = time.time() - start_time
-    logging.info(f"Detección completada en {elapsed_time:.3f} segundos.")
-
-    if anomalies:
-        for anomaly in anomalies:
-            logging.info(f"Anomalía detectada: {json.dumps(anomaly, indent=2)}")
-
-    return anomalies
 
 
-def acquire_lock(key):
-    """Intenta adquirir un lock en Redis."""
-    lock_key = f"lock:{key}"
-    is_locked = redis_client.set(lock_key, "1", nx=True, ex=LOCK_EXPIRY_SECONDS)
-    return is_locked
 
-def release_lock(key):
-    """Libera el lock en Redis."""
-    lock_key = f"lock:{key}"
-    redis_client.delete(lock_key)
-
-def store_checksum_atomic(checksum):
-    """Guarda un checksum en Redis con exclusión mutua."""
-    lock_key = f"checksum:{checksum}"
-    if acquire_lock(lock_key):
-        try:
-            redis_client.sadd("processed_checksums", checksum)
-            logging.info(f"Checksum almacenado: {checksum}")
-        finally:
-            release_lock(lock_key)
-    else:
-        logging.warning(f"No se pudo adquirir lock para checksum: {checksum}")
-
-def is_checksum_processed_atomic(checksum):
-    """Verifica si un checksum ya fue procesado."""
-    return redis_client.sismember("processed_checksums", checksum)
-
-
-def filter_unique_transactions(rows_to_process):
-    """Filtra las transacciones únicas utilizando Redis."""
-    unique_rows = []
-    for row in rows_to_process:
-        checksum = row['checksum']
-        if not is_checksum_processed_atomic(checksum):
-            unique_rows.append(row)
-            store_checksum_atomic(checksum)
-        else:
-            logging.info(f"Checksum ya procesado: {checksum}")
-
-    logging.info(f"Transacciones únicas a procesar: {len(unique_rows)}")
-    return unique_rows
 
 
 
@@ -168,6 +93,8 @@ def filter_unique_transactions(rows_to_process):
 async def process_event(request: Request):
     """Endpoint para recibir y procesar eventos de Pub/Sub."""
     try:
+        etl = ETL('config/transactions.yaml',"transactions")
+        
         body = await request.json()
         logging.info(f"Evento recibido: {body}")
 
@@ -176,19 +103,29 @@ async def process_event(request: Request):
         bucket_name, file_path = validate_event_data(event_data)
 
         partitions = parse_partitions(file_path)
+        partitions['file_name'] = file_path 
+        
+        # Run ETL: get data from bigquery
+        rows_to_process=etl.run_extraction(partitions)
 
         #raw data
-        rows_to_process = query_raw_transactions(partitions, file_path)
+        #rows_to_process = query_raw_transactions(partitions, file_path)
         logging.info(f"Transacciones ingestadas en raw: {len(rows_to_process)}\n")
-        #for row in rows_to_process:
-        #    logging.info(f"Transacción recuperada: {row}")
+        for row in rows_to_process:
+            logging.info(f"Transacción recuperada: {row}")
 
-        
+        #transformations
+        transactions=etl.run_transformations(rows_to_process)
+        logging.info(f"Transacciones después de transformaciones: {len(transactions)}\n")
+        for transaction in transactions:
+            logging.info(f"Transacción transformada: {transaction}")
+
         # Detectar anomalías
-        anomalies = process_anomalies(rows_to_process, bigquery_data)
+        #anomalies = process_anomalies(rows_to_process, bigquery_data)
+        #filtros antes de subir a redis y bigquery
+        
 
-
-        unique_rows = filter_unique_transactions(rows_to_process)
+        unique_rows = filter_unique_transactions(redis_client, rows_to_process)
 
         # Procesar transacciones únicas
         process_transactions(unique_rows)
